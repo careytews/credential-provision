@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-vpn-key
+spec:
+  activeDeadlineSeconds: 100
+  template:
+    metadata:
+      name: credential-mgmt
+    spec:
+      containers:
+      - name: credential-mgmt
+        image: gcr.io/trust-networks/credential-mgmt:0.4
+        command: ["./create-vpn-key",  "mark.adams@trustnetworks.com", "mark-mac"]
+        volumeMounts:
+        - mountPath: /key
+          name: keys
+          readOnly: True
+        - mountPath: /vpn_ca_cert
+          name: vpn-ca-creds
+          readOnly: True
+        - mountPath: /vpn_ca
+          name: vpn-ca-data
+        env:
+        - name: CA
+          value: /vpn_ca
+        - name: CA_CERT
+          value: /vpn_ca_cert
+      restartPolicy: Never
+      volumes:
+      - name: keys
+        secret:
+          secretName: keys
+      - name: vpn-ca-creds
+        secret:
+          secretName: vpn-ca-creds
+      - name: vpn-ca-data
+        gcePersistentDisk:
+          pdName: vpn-ca-data-0000
+          fsType: ext4

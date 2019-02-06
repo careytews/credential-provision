@@ -1,0 +1,102 @@
+#!/bin/bash
+
+if [ $# -ne 3 ]
+then
+    echo Usage: 1>&2
+    echo "  create-probe-key USER PROBE-ID HOST:PORT" 1>&2
+    exit 1
+fi
+
+user="$1"
+probeid="$2"
+endpoint="$3"
+desc="Probe certificate for $probeid"
+key=/tmp/key$$
+tmp=/tmp/tmp$$
+
+port=${endpoint#*:}
+host=${endpoint%:*}
+
+if [ -z "${port}" ]
+then
+    port=9001
+fi
+
+# Arg 1 Error Code
+cleanupAndExit()
+{
+    err=${1:-0}
+    
+    rm -f ${key} ${key}.enc ${tmp}
+    rm -f probe-cert.p12 probe-cert.p12.enc
+    rm -f probe-cert.pass.enc
+
+    if [ $err -ne 0 ]; then
+        ./revoke-probe-key "${user}"
+    fi
+
+    exit $err
+}
+
+# CKMS needs to know about service accounts.  This assumes that all
+# SAs have the same domain structure (which they seem to).
+if expr "${user}" : '.*.gserviceaccount.com$' >/dev/null
+then
+    isSa=yes
+else
+    isSa=no
+fi
+
+# Cleanup at start
+./revoke-probe-key "${user}"
+
+rm -f ${key} ${tmp} probe-cert.p12 probe-cert.p12.enc probe-cert.pass.enc
+
+
+# Google cloud key
+gkey=${KEY:-/key/private.json}
+
+echo "* Create key/certificate..." 1>&2
+output=$(./do-create-probe-key "${probeid}" "${user}") || cleanupAndExit 1
+pass=$(echo $output | awk '{print $2}')
+output=$(echo $output | awk '{print $1}')
+
+echo '* Extract metadata...' 1>&2
+openssl pkcs12 -in ${output} -passin pass:${pass} -nodes -clcerts > ${tmp} 
+start=$(openssl x509 -in ${tmp} -noout -startdate | sed 's/notBefore=//')
+end=$(openssl x509 -in ${tmp} -noout -enddate | sed 's/notAfter=//')
+rm -f ${tmp}
+
+cert_name="${probeid}"
+	
+echo "* Transfer $output..." 1>&2
+cat $output > probe-cert.p12
+
+echo "* Configure CKMS..." 1>&2
+./setup-ckms ${gkey} "${user}" ${isSa} || cleanupAndExit 1
+
+echo "* Generate encryption key..." 1>&2
+./generate-key > ${key}
+./encode-key ${gkey} "${user}" ${key} > ${key}.enc || cleanupAndExit 1
+
+echo "* Encode probe-cert.p12..." 1>&2
+./encode-file ${key} "probe-cert.p12" "$desc" > probe-cert.p12.enc
+
+echo "* Upload probe-cert.p12 to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" probe-cert.p12.enc ${cert_name}.p12 || cleanupAndExit 1
+
+echo "* Encode secret..." 1>&2
+./encode-secret ${key} "probe-cert.pass" "${pass}" "${desc2}" > probe-cert.pass.enc
+
+echo "* Upload probe-cert.pass to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" probe-cert.pass.enc "${cert_name}.pass" || cleanupAndExit 1
+
+
+echo "* Update index" 1>&2
+removalterm= "\"name\": \"${probeid}\""
+updateline="{\"type\":\"probe\", \"name\": \"${probeid}\", \"description\": \"${desc}\", \"key\": \"$(cat ${key}.enc)\", \"start\": \"${start}\", \"end\": \"${end}\", \"bundle\": \"${cert_name}.p12\", \"password\": \"${cert_name}.pass\", \"host\": \"${host}\", \"port\": \"${port}\"}"
+./update-index-file ${gkey} "${user}" "${removalterm}" "${updateline}" INDEX
+
+echo "* All done." 1>&2 
+
+cleanupAndExit 0

@@ -1,0 +1,20 @@
+#!/bin/bash
+
+if [ $# -ne 1 ]
+then
+    echo Usage: 1>&2
+    echo "  revoke-all-key EMAIL" 1>&2
+    exit 1
+fi
+
+email="$1"
+desc="Revoke all certificates for $1"
+
+./revoke-web-key "${email}"
+
+./revoke-vpn-key "${email}"
+
+./revoke-probe-key "${email}"
+
+echo "* All done." 1>&2
+exit 0

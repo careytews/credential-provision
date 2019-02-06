@@ -1,0 +1,98 @@
+#!/bin/bash
+
+if [ $# -lt 1 ]
+then
+    echo Usage: 1>&2
+    echo "  revoke-web-key EMAIL [COMMON_NAME]" 1>&2
+    exit 1
+fi
+
+email="$1"
+common_name="${2:-"*"}"
+
+desc="Revoke Web certificate for $1 - $2"
+ca=${VPN_CA:-.}
+ca_cert=${VPN_CA_CERT:-.}
+bucket=${CRL_BUCKET:-""}
+
+# Temp Files
+TMP_CRL=${ca}/crl.tmp$$
+TMP_WORK=/tmp/tmp$$
+
+# Output Files
+CRL=${ca}/crl
+
+# Revocation List
+REVOKE_REGISTER=${ca}/revoke_register
+
+# Revoked Cert Dir
+REVOKE_DIR=${ca}/revoked
+
+# Certificate file prefix
+CERT_PREFIX="cert."
+
+rm -f ${TMP_WORK} ${TMP_CRL}
+
+# Google cloud key
+gkey=${KEY:-/key/private.json}
+
+echo "* Revoke key/certificates..." 1>&2
+
+if [ "${common_name}" == "*" ]; then
+  ./find-cert -e "${email}" -p "${CERT_PREFIX}" -d "${ca}" | sort | uniq > ${TMP_WORK}
+  ./find-cert -e "${email}" -p "${CERT_PREFIX}" -d "${ca}" -x | sort | uniq > ${TMP_WORK}-ext 
+else
+  ./find-cert -e "${email}" -s "${common_name}" -p "${CERT_PREFIX}" -d "${ca}" | sort | uniq > ${TMP_WORK}
+  ./find-cert -e "${email}" -s "${common_name}" -p "${CERT_PREFIX}" -d "${ca}" -x | sort | uniq > ${TMP_WORK}-ext 
+fi
+
+
+if [ "$(wc -c < ${TMP_WORK} | sed -e "s/ //g" )" == "0" ]; then
+    echo "* No Certs Found..." 1>&2
+    rm ${TMP_WORK} ${TMP_WORK}-ext
+    exit 1
+fi
+
+cat  ${TMP_WORK} >> ${REVOKE_REGISTER}
+
+mkdir -p ${REVOKE_DIR}
+for i in $(cut -f1 -d, ${TMP_WORK})
+do
+    echo "*   "$i 1>&2
+    mv ${ca}/*${i}* ${REVOKE_DIR}
+done
+
+rm ${TMP_WORK}
+
+echo "* Update CRL..." 1>&2
+
+./create-crl -k ${ca_cert}/key.ca -c ${ca_cert}/cert.ca -r ${REVOKE_REGISTER} > ${TMP_CRL}
+mv ${TMP_CRL} ${CRL}
+
+if [ "${bucket}" != "" ]; then
+  echo "* Upload CRL..." 1>&2
+  ./upload-crl-to-storage ${gkey} ${bucket} ${CRL} vpn.crl
+fi
+
+./download-from-storage ${gkey} "${email}"  INDEX > ${TMP_WORK}
+
+for i in $(cut -f5 -d, ${TMP_WORK}-ext|sort|uniq)
+do	 
+  echo "* Delete ${i}.ovpn from Google Storage..." 1>&2
+
+  ./delete-from-storage ${gkey} "${email}"  "${i}-us.ovpn"
+  ./delete-from-storage ${gkey} "${email}"  "${i}-uk.ovpn"
+
+  grep -v "\"device\": \"${i}\"" < ${TMP_WORK} > ${TMP_WORK}2
+
+  mv ${TMP_WORK}2 ${TMP_WORK}
+done
+
+echo "* Update index" 1>&2
+./upload-to-storage ${gkey} "${email}" ${TMP_WORK} INDEX
+
+rm -f ${TMP_WORK} ${TMP_WORK}-ext
+
+echo "* All done." 1>&2
+exit 0
+

@@ -1,0 +1,79 @@
+#!/bin/bash
+
+if [ $# -ne 1 ]
+then
+    echo Usage: 1>&2
+    echo "  revoke-probe-key EMAIL" 1>&2
+    exit 1
+fi
+
+email="$1"
+desc="Revoke Probe certificate for $1"
+ca=${PROBE_CA:-.}
+ca_cert=${PROVE_CA_CERT:-.}
+
+bucket=${CRL_BUCKET:-""}
+
+# Temp Files
+TMP_CRL=${ca}/crl.tmp$$
+TMP_WORK=/tmp/tmp$$
+
+# Output Files
+CRL=${ca}/crl
+
+# Revocation List
+REVOKE_REGISTER=${ca}/revoke_register
+
+# Revoked Cert Dir
+REVOKE_DIR=${ca}/revoked
+
+# Certificate file prefix
+CERT_PREFIX="cert."
+
+rm -f ${TMP_WORK} ${TMP_CRL}
+
+# Google cloud key
+gkey=${KEY:-/key/private.json}
+
+echo "* Revoke key/certificates..." 1>&2
+
+./find-cert -e "${email}" -p "${CERT_PREFIX}" -d "${ca}" | sort | uniq > ${TMP_WORK} 
+
+if [ "$(wc -c < ${TMP_WORK} | sed -e "s/ //g" )" == "0" ]; then
+    echo "* No Certs Found..." 1>&2
+    rm ${TMP_WORK}
+    exit 1
+fi
+
+cat  ${TMP_WORK} >> ${REVOKE_REGISTER}
+
+mkdir -p ${REVOKE_DIR}
+for i in $(cut -f1 -d, ${TMP_WORK})
+do
+    echo "*   "$i 1>&2
+    mv ${ca}/*${i}* ${REVOKE_DIR}
+done
+
+rm ${TMP_WORK}
+
+echo "* Update CRL..." 1>&2
+
+./create-crl -k ${ca_cert}/key.ca -c ${ca_cert}/cert.ca -r ${REVOKE_REGISTER} > ${TMP_CRL}
+mv ${TMP_CRL} ${CRL}
+
+if [ "${bucket}" != "" ]; then
+  echo "* Upload CRL..." 1>&2
+  ./upload-crl-to-storage ${gkey} ${bucket} ${CRL} probe.crl
+fi
+
+echo "* Delete probe-cert.p12 from Google Storage..." 1>&2
+./delete-from-storage ${gkey} "${email}"  probe-cert.p12
+
+echo "* Delete probe-cert.pass from Google Storage..." 1>&2
+./delete-from-storage ${gkey} "${email}"  probe-cert.pass
+
+echo "* Update index" 1>&2
+removalterm="\"bundle\": \"probe-cert.p12\""
+./update-index-file ${gkey} "${email}" "${removalterm}" "" INDEX
+echo "* All done." 1>&2
+exit 0

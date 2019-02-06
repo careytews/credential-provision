@@ -1,0 +1,106 @@
+#!/bin/bash
+
+if [ $# -ne 2 ]
+then
+    echo 'Usage:' 1>&2
+    echo '  create "Probe-ID" full.name@trustnetworks.com' 1>&2
+    exit 1
+fi
+
+id="$1"
+email="$2"
+ca=${PROBE_CA:-.}
+ca_cert=${PROBE_CA_CERT:-.}
+
+# Static hard-coded password.
+PASSWORD=x
+
+# Certificates valid for 2 years.
+CERT_VALIDITY=710
+
+# Temporary files.
+KEY_FILE=${ca}/key.user$$
+REQ_FILE=${ca}/req.user$$
+
+# Output files.
+CERT_FILE=${ca}/cert.user$$
+PKG_FILE=${ca}/pkg.user$$
+
+# Create private key.
+echo '**** Generate private key...' 1>&2
+./create-key > ${KEY_FILE}
+if [ $? -ne 0 ]
+then
+    echo Private key generation failed. 1>&2
+    exit 1
+fi
+
+# Create certificate request.
+echo '**** Generate certificate request...' 1>&2
+./create-cert-request -k ${KEY_FILE} -U Users -O 'Trust Networks' \
+    -N "${id}" -E "${email}" > ${REQ_FILE}
+if [ $? -ne 0 ]
+then
+    echo Certificate request creation failed. 1>&2
+    exit 1
+fi
+
+echo '**** Signing request...' 1>&2
+# Sign certificate request to create certificate.
+./create-cert -r ${REQ_FILE} -k ${ca_cert}/key.ca -c ${ca_cert}/cert.ca \
+    -v ${CERT_VALIDITY} -C > ${CERT_FILE}
+if [ $? -ne 0 ]
+then
+    echo Certificate signing failed. 1>&2
+    exit 1
+fi
+
+# Delete request.
+rm -f ${REQ_FILE}
+
+# Verify.
+echo '**** Verify certificate...' 1>&2
+openssl verify -CAfile ${ca_cert}/cert.ca ${CERT_FILE} 1>&2
+if [ $? -ne 0 ]
+then
+    echo Certificate verification failed. 1>&2
+    exit 1
+fi
+
+# Create PKCS12 package.
+echo '**** Create key/certificate package...' 1>&2
+openssl pkcs12 -export -passout pass:${PASSWORD} -inkey ${KEY_FILE} \
+	-in ${CERT_FILE} -caname 'Trust Networks' \
+	-certfile ${ca_cert}/cert.ca -out ${PKG_FILE}
+if [ $? -ne 0 ]
+then
+    echo Package creation failed. 1>&2
+    exit 1
+fi
+
+(
+    openssl x509 -in ${CERT_FILE}  -noout -serial -email -subject -dates
+    echo '----'
+) >> ${ca}/register
+
+# Remove stuff not needed.
+rm -f ${KEY_FILE}
+
+# This leaves the certificate and the package.  Now, rename them.
+
+# Get certificate serial.
+serial=$(openssl x509 -in ${CERT_FILE} -noout -serial | sed 's/serial=//')
+
+mv ${CERT_FILE} ${ca}/cert.${serial}
+CERT_FILE=${ca}/cert.${serial}
+
+mv ${PKG_FILE} ${ca}/pkg.${serial}.p12
+PKG_FILE=${ca}/pkg.${serial}.p12
+
+echo '**** All complete.' 1>&2
+
+echo PKCS12 package is in ${PKG_FILE} 1>&2
+echo Password is ${PASSWORD} 1>&2
+
+echo ${PKG_FILE} ${PASSWORD}
+

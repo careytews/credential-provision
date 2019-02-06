@@ -1,0 +1,124 @@
+#!/bin/bash
+
+if [ $# -ne 5 ]
+then
+    echo Usage: 1>&2
+    echo "  create-vpn-service-key USER SERVICE-ID HOST ALLOC PROBE" 1>&2
+    exit 1
+fi
+
+user="$1"
+id="$2"
+host="$3"
+allocator="$4"
+probekey="$5"
+desc="Probe certificate for $id"
+key=/tmp/key$$
+tmp=/tmp/tmp$$
+
+extras="/vpn_ca_cert/ta.key /tmp/dh.server"
+
+if [ -z "${port}" ]
+then
+    port=9001
+fi
+
+# Arg 1 Error Code
+cleanupAndExit()
+{
+    err=${1:-0}
+    
+    rm -f ${key} ${key}.enc ${tmp}
+    rm -f vpn-service-cert.p12 vpn-service-cert.p12.enc
+    rm -f vpn-service-cert.pass.enc
+
+# FIXME: Not implemented.
+#     if [ $err -ne 0 ]; then
+#         ./revoke-vpn-service-key "${user}"
+#     fi
+
+    exit $err
+}
+
+# CKMS needs to know about service accounts.  This assumes that all
+# SAs have the same domain structure (which they seem to).
+if expr "${user}" : '.*.gserviceaccount.com$' >/dev/null
+then
+    isSa=yes
+else
+    isSa=no
+fi
+
+# Cleanup at start
+./revoke-vpn-service-key "${user}"
+
+rm -f ${key} ${tmp} vpn-service-cert.p12 vpn-service-cert.p12.enc vpn-service-cert.pass.enc
+
+
+# Google cloud key
+gkey=${KEY:-/key/private.json}
+
+echo "* Create key/certificate..." 1>&2
+output=$(./do-create-vpn-service-key "${id}" "${user}" "${host}") || cleanupAndExit 1
+pass=$(echo $output | awk '{print $2}')
+output=$(echo $output | awk '{print $1}')
+echo output is ${output}
+
+echo '* Extract metadata...' 1>&2
+openssl pkcs12 -in ${output} -passin pass:${pass} -nodes -clcerts > ${tmp} 
+start=$(openssl x509 -in ${tmp} -noout -startdate | sed 's/notBefore=//')
+end=$(openssl x509 -in ${tmp} -noout -enddate | sed 's/notAfter=//')
+rm -f ${tmp}
+
+cert_name="${id}"
+	
+echo "* Create output..." 1>&2
+
+echo "* Create DH params..." 1>&2
+dd bs=1 count=64 if=/dev/urandom of=/tmp/random
+openssl dhparam -rand /tmp/random -out /tmp/dh.server 2048
+
+cat $output > vpn-service-cert.p12
+
+echo "* Configure CKMS..." 1>&2
+./setup-ckms ${gkey} "${user}" ${isSa} || cleanupAndExit 1
+
+echo "* Generate encryption key..." 1>&2
+./generate-key > ${key}
+./encode-key ${gkey} "${user}" ${key} > ${key}.enc || cleanupAndExit 1
+
+echo "* Encode vpn-service-cert.p12..." 1>&2
+./encode-file ${key} "vpn-service-cert.p12" "$desc" > vpn-service-cert.p12.enc
+
+echo "* Upload vpn-service-cert.p12 to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" vpn-service-cert.p12.enc ${cert_name}.p12 || cleanupAndExit 1
+
+echo "* Encode secret..." 1>&2
+./encode-secret ${key} "vpn-service-cert.pass" "${pass}" "Password" > vpn-service-cert.pass.enc
+
+echo "* Upload vpn-service-cert.pass to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" vpn-service-cert.pass.enc "${cert_name}.pass" || cleanupAndExit 1
+
+echo "* Encode probe key..." 1>&2
+./encode-secret ${key} "probe-key.pass" "${probekey}" "Probe key" > probe-key.pass.enc
+
+echo "* Upload vpn-service-cert.pass to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" probe-key.pass.enc "${cert_name}-probe-key" || cleanupAndExit 1
+
+for e in ${extras}
+do
+  e_file=$(basename $e)
+  echo "* Encode ${e_file}..." 1>&2
+  ./encode-file ${key} "$e" "${e_file}" > ${e_file}.enc
+  echo "* Upload to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" ${e_file}.enc ${cert_name}-${e_file} || cleanupAndExit 1
+done
+
+echo "* Update index" 1>&2
+removalterm="\"name\": \"${id}\""
+updateline="{\"type\":\"vpn-service\", \"name\": \"${id}\", \"description\": \"${desc}\", \"key\": \"$(cat ${key}.enc)\", \"start\": \"${start}\", \"end\": \"${end}\", \"bundle\": \"${cert_name}.p12\", \"password\": \"${cert_name}.pass\", \"dh\": \"${cert_name}-dh.server\", \"ta\": \"${cert_name}-ta.key\", \"host\": \"${host}\", \"allocator\": \"${allocator}\", \"probekey\": \"${cert_name}-probe-key\"}"
+./update-index-file ${gkey} "${user}" "${removalterm}" "${updateline}" INDEX
+
+echo "* All done." 1>&2
+
+cleanupAndExit 0

@@ -1,0 +1,53 @@
+#!/bin/bash
+
+bucket=${CRL_BUCKET:-""}
+
+vca=${VPN_CA:-.}
+vca_cert=${VPN_CA_CERT:-.}
+
+# Google cloud key
+gkey=${KEY:-/key/private.json}
+
+# Temp Files
+TMP_VCRL=${vca}/crl.tmp$$
+
+# Output Files
+vcrl=${vca}/crl
+
+# Revocation List
+vrevoke_register=${vca}/revoke_register
+
+wca=${WEB_CA:-.}
+wca_cert=${WEB_CA_CERT:-.}
+
+# Output Files
+wcrl=${wca}/crl
+
+# Temp Files
+TMP_WCRL=${wca}/crl.tmp$$
+
+# Revocation List
+wrevoke_register=${wca}/revoke_register
+
+rm -f ${TMP_WCRL} ${TMP_VCRL}
+
+echo "* Update VPN CRL..." 1>&2
+
+./create-crl -k ${vca_cert}/key.ca -c ${vca_cert}/cert.ca -r ${vrevoke_register} > ${TMP_VCRL}
+mv ${TMP_VCRL} ${vcrl}
+
+echo "* Update WEB CRL..." 1>&2
+
+./create-crl -k ${wca_cert}/key.ca -c ${wca_cert}/cert.ca -r ${wrevoke_register} > ${TMP_WCRL}
+mv ${TMP_WCRL} ${wcrl}
+
+if [ "${bucket}" != "" ]; then
+  echo "* Upload VPN CRL..." 1>&2
+  ./upload-crl-to-storage ${gkey} ${bucket} ${vcrl} vpn.crl
+
+  echo "* Upload WEB CRL..." 1>&2
+  ./upload-crl-to-storage ${gkey} ${bucket} ${wcrl} web.crl
+fi
+
+echo "* All done." 1>&2
+exit 0

@@ -1,0 +1,96 @@
+#!/bin/bash
+
+if [ $# -ne 2 ]
+then
+    echo Usage: 1>&2
+    echo "  create-vpn-key USER DEVICE" 1>&2
+    exit 1
+fi
+
+user="$1"
+device="$2"
+desc="OpenVPN configuration file for device $device"
+key=/tmp/key$$
+tmp=/tmp/tmp$$
+device_type=${device##*-}
+
+# Arg 1 Error Code
+cleanupAndExit()
+{
+    err=${1:-0}
+    
+    rm -f ${key} ${key}.enc ${tmp}
+    rm -f "${device}-us.ovpn" "${device}-us.enc"
+    rm -f "${device}-uk.ovpn" "${device}-uk.enc"
+
+    if [ $err -ne 0 ]; then
+        ./revoke-vpn-key "${user}" "${device}" 1>&2
+    fi
+
+    exit $err
+}
+
+# CKMS needs to know about service accounts.  This assumes that all
+# SAs have the same domain structure (which they seem to).
+if expr "${user}" : '.*.gserviceaccount.com$' >/dev/null
+then
+    isSa=yes
+else
+    isSa=no
+fi
+
+./revoke-vpn-key "${user}" "${device}" 1>&2
+
+rm -f ${key} ${key}.enc ${tmp}
+rm -f "${device}-us.ovpn" "${device}-us.enc"
+rm -f "${device}-uk.ovpn" "${device}-uk.enc"
+
+# Google cloud key
+gkey=${KEY:-/key/private.json}
+
+echo '* Create key...' 1>&2
+output=$(./do-create-vpn-key "${device}" "${user}") || cleanupAndExit 1
+
+echo '* Extract metadata...' 1>&2
+awk '/<cert>/{flag=1;next}/<\/cert>/{flag=0}flag' \
+    < ${output} > ${tmp}
+start=$(openssl x509 -in ${tmp} -noout -startdate | sed 's/notBefore=//')
+end=$(openssl x509 -in ${tmp} -noout -enddate | sed 's/notAfter=//')
+rm -f ${tmp}
+	
+echo "* Transfer $output..." 1>&2
+cat $output > "${device}-us.ovpn"
+
+echo "* Configure CKMS..." 1>&2
+./setup-ckms ${gkey} "${user}" ${isSa} || cleanupAndExit 1
+
+echo "* Generate encryption key..." 1>&2
+./generate-key > ${key}
+./encode-key ${gkey} "${user}" ${key} > ${key}.enc  || cleanupAndExit 1
+
+echo "* Encode ${device}-us.ovpn..." 1>&2
+./encode-file ${key} "${device}-us.ovpn" "$desc" > "${device}-us.enc"
+
+echo "* Upload ${device}-us.ovpn to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" "${device}-us.enc" "${device}-us.ovpn"  || cleanupAndExit 1
+
+echo "* Create UK variant..." 1>&2
+cat "${device}-us.ovpn" | \
+    sed 's/us-vpn.ops.trustnetworks.com/uk-vpn.ops.trustnetworks.com/' \
+    > "${device}-uk.ovpn"
+
+echo "* Encode ${device}-uk.ovpn..." 1>&2
+./encode-file ${key} "${device}-uk.ovpn" "$desc" > "${device}-uk.enc"
+
+echo "* Upload ${device}-uk.ovpn to Google Storage..." 1>&2
+./upload-to-storage ${gkey} "${user}" "${device}-uk.enc" "${device}-uk.ovpn" || cleanupAndExit 1
+
+echo "* Update index" 1>&2
+# Update VPN key with race-condition protection
+removalterm="\"device\": \"${device}\""
+updateline="{\"type\": \"vpn\", \"device\": \"${device}\", \"description\": \"${desc}\", \"key\": \"$(cat ${key}.enc)\", \"start\": \"${start}\", \"end\": \"${end}\", \"device_type\": \"${device_type}\", \"us\": \"${device}-us.ovpn\", \"uk\": \"${device}-uk.ovpn\"}"
+./update-index-file ${gkey} "${user}" "${removalterm}" "${updateline}" INDEX
+
+echo "* All done." 1>&2
+
+cleanupAndExit 0

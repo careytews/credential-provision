@@ -1,0 +1,46 @@
+
+How it works:
+
+- Each user has a master key on Cloud KMS.  This is an encryption/decryption
+  device which ensures that nobody gets to see the encryption key.
+
+- Each secret file is stored on Google Storage in the trust-networks-credentials
+  bucket.  There is a top level directory for each user, and the files are
+  container therein.
+
+- There are two levels of encryption: Each secret file is encrypted with its
+  own key, AES256, 256-bit key.  That key is itself encrypted with the master
+  key and then stored in the <filename>.key.
+
+To use credential creation:
+
+- You need a service account actor on Google cloud. User needs Cloud KMS
+  Admin role and Storage admin, and create a JSON key file, place it in
+  the current directory call it private.json.
+
+- If a user has no KMS key setup, you should run:
+
+    ./setup-ckms private.json email@domain.com
+
+  If you're not sure, it's safe to run this.
+
+- To create a VPN key:
+
+    ./create-vpn-key email@domain.com device-id
+
+  e.g.
+
+    ./create-vpn-key mark.adams@trustnetworks.com mark-mac
+
+- To create a web key:
+
+    ./create-web-key email@domain.com "Certificate Name"
+
+  e.g.
+
+    ./create-web-key mark.adams@trustnetworks.com "Mark Adams (Trust Networks)"
+
+  When users have multiple certificates in their keychain, e.g. to different
+  TN clusters, it can be useful to have the cluster name in the certificate
+  to make it easier to choose.
+
